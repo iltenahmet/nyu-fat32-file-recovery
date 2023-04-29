@@ -107,7 +107,6 @@ void print_file_system_information(BootEntry boot_entry)
 	printf("Number of reserved sectors = %u\n", boot_entry.BPB_RsvdSecCnt);
 }
 
-
 int main(int argc, char *argv[])
 {
 	if (argc < 3)
@@ -119,14 +118,6 @@ int main(int argc, char *argv[])
 	char *disk_image_arg = argv[1];
 	char *option = argv[2];
 
-	int fd = open(disk_image_arg, O_RDWR);
-	if (fd == -1)
-	{
-		perror("Error opening the disk image.");
-		return 1;
-	}
-	BootEntry boot_entry = get_file_system_information(fd);
-
 	if (strcmp(option, "-i") == 0)
 	{
 		if (argc != 3)
@@ -135,7 +126,15 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
+		int fd = open(disk_image_arg, O_RDWR);
+		if (fd == -1)
+		{
+			perror("Error opening the disk image.");
+			return 1;
+		}
+		BootEntry boot_entry = get_file_system_information(fd);
 		print_file_system_information(boot_entry);
+		close(fd);
 	}
 	else if (strcmp(option, "-l") == 0)
 	{
@@ -174,8 +173,6 @@ int main(int argc, char *argv[])
 		print_usage_information();
 		return 1;
 	}
-
-	close(fd);
 
 	return 0;
 }
