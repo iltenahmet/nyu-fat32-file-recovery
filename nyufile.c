@@ -128,9 +128,42 @@ void list_root_directory(int fd, BootEntry boot_entry)
 
 		if (dir_entry.DIR_Name[0] != 0xE5) // 0xE5 -> deleted
 		{
-			char file_name[12];
+			char file_name[13];
 			memcpy(file_name, dir_entry.DIR_Name, 11);
-			file_name[11] = '\0';
+
+			int dot_index = 8;
+			char extension[3];
+			for (int i = 0; i < 8; i++) // extract the file name (without extension)
+			{
+				if (file_name[i] == ' ')
+				{
+					dot_index = i;
+					break;
+				}
+			}
+			for (int i = 0; i < 3; i++) // extract the extension
+			{
+				extension[i] = file_name[8+i];
+			}
+
+			if (extension[0] == ' ')
+			{
+				file_name[dot_index] = '\0';
+			}
+			else // put '.' and extension right after file name
+			{
+				file_name[dot_index] = '.';
+				for (int i = 0; i < 3; i++)
+				{
+					if (extension[i] == ' ')
+					{
+						file_name[dot_index+1+i] = '\0';
+						break;
+					}
+					file_name[dot_index+1+i] = extension[i];
+				}
+				file_name[dot_index+4] = '\0';
+			}
 
 			if (dir_entry.DIR_Attr & 0x10) // entry is a directory
 			{
@@ -138,8 +171,16 @@ void list_root_directory(int fd, BootEntry boot_entry)
 			}
 			else
 			{
-				printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
-					   dir_entry.DIR_FstClusLO);
+				if (dir_entry.DIR_FileSize == 0)
+				{
+					printf("%s (size = %u)\n", file_name, dir_entry.DIR_FileSize);
+				}
+				else
+				{
+					printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
+						   dir_entry.DIR_FstClusLO);
+				}
+
 			}
 			entry_count++;
 		}
