@@ -18,8 +18,8 @@ zip nyufile.zip Makefile *.h *.c
 #include <fcntl.h>
 #include <unistd.h>
 
-const int STARTING_CLUSTER = 2;
-const size_t DIR_ENTRY_SIZE = 32;
+const unsigned int STARTING_CLUSTER = 2;
+const unsigned int DIR_ENTRY_SIZE = 32;
 
 #pragma pack(push, 1)
 typedef struct BootEntry
@@ -83,21 +83,21 @@ void print_usage_information()
 
 BootEntry get_file_system_information(int fd)
 {
-	struct stat sb;
-	if (fstat(fd, &sb) == -1)
+	struct stat buffer;
+	if (fstat(fd, &buffer) == -1)
 	{
 		perror("fstat error");
 		exit(EXIT_FAILURE);
 	}
 
-	void *mapped_data = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (mapped_data == MAP_FAILED)
+	void *data = mmap(NULL, buffer.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (data == MAP_FAILED)
 	{
 		perror("mmap error");
 		exit(EXIT_FAILURE);
 	}
 
-	BootEntry boot_entry = *((BootEntry *) mapped_data);
+	BootEntry boot_entry = *((BootEntry *) data);
 	return boot_entry;
 }
 
@@ -107,6 +107,44 @@ void print_file_system_information(BootEntry boot_entry)
 	printf("Number of bytes per sector = %u\n", boot_entry.BPB_BytsPerSec);
 	printf("Number of sectors per cluster = %u\n", boot_entry.BPB_SecPerClus);
 	printf("Number of reserved sectors = %u\n", boot_entry.BPB_RsvdSecCnt);
+}
+
+void list_root_directory(int fd, BootEntry boot_entry)
+{
+	unsigned int FAT_size = boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
+	unsigned int root_dir_start =
+			boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec + (boot_entry.BPB_NumFATs * FAT_size);
+
+	lseek(fd, root_dir_start, SEEK_SET);
+	DirEntry dir_entry;
+
+	int entry_count = 0;
+	while (read(fd, &dir_entry, DIR_ENTRY_SIZE) == DIR_ENTRY_SIZE)
+	{
+		if (dir_entry.DIR_Name[0] == 0x00) // End of root dir
+		{
+			break;
+		}
+
+		if (dir_entry.DIR_Name[0] != 0xE5) // 0xE5 -> deleted
+		{
+			char file_name[12];
+			memcpy(file_name, dir_entry.DIR_Name, 11);
+			file_name[11] = '\0';
+
+			if (dir_entry.DIR_Attr & 0x10) // entry is a directory
+			{
+				printf("%s/ (starting cluster = %u)\n", file_name, dir_entry.DIR_FstClusLO);
+			}
+			else
+			{
+				printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
+					   dir_entry.DIR_FstClusLO);
+			}
+			entry_count++;
+		}
+	}
+	printf("Total number of entries = %d\n", entry_count);
 }
 
 int main(int argc, char *argv[])
@@ -132,16 +170,22 @@ int main(int argc, char *argv[])
 					perror("Error opening the disk image.");
 					return 1;
 				}
-
 				BootEntry boot_entry = get_file_system_information(fd);
 				print_file_system_information(boot_entry);
-
 				close(fd);
 				break;
 			}
 			case 'l':
 			{
-				// List the root directory
+				int fd = open(disk_image_arg, O_RDWR);
+				if (fd == -1)
+				{
+					perror("Error opening the disk image.");
+					return 1;
+				}
+				BootEntry boot_entry = get_file_system_information(fd);
+				list_root_directory(fd, boot_entry);
+				close(fd);
 				break;
 			}
 			case 'r':
