@@ -13,6 +13,7 @@ zip nyufile.zip Makefile *.h *.c
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -83,7 +84,7 @@ void print_usage_information()
 	printf("  -R filename -s sha1    Recover a possibly non-contiguous file.\n");
 }
 
-BootEntry get_file_system_information(int fd)
+BootEntry get_file_system_info(int fd)
 {
 	struct stat buffer;
 	if (fstat(fd, &buffer) == -1)
@@ -103,7 +104,7 @@ BootEntry get_file_system_information(int fd)
 	return boot_entry;
 }
 
-void print_file_system_information(BootEntry boot_entry)
+void print_file_system_info(BootEntry boot_entry)
 {
 	printf("Number of FATs = %u\n", boot_entry.BPB_NumFATs);
 	printf("Number of bytes per sector = %u\n", boot_entry.BPB_BytsPerSec);
@@ -111,194 +112,130 @@ void print_file_system_information(BootEntry boot_entry)
 	printf("Number of reserved sectors = %u\n", boot_entry.BPB_RsvdSecCnt);
 }
 
-void list_root_directory(int fd, BootEntry boot_entry)
+char* convert_file_name(char* file_name)
 {
-	u32 entry_count = 0;
-	u32 current_cluster = boot_entry.BPB_RootClus;
+	int dot_index = 8;
+	char extension[3];
 
-	u32 cluster_size = boot_entry.BPB_SecPerClus * boot_entry.BPB_BytsPerSec;
-	u32 max_entry_count = cluster_size / DIR_ENTRY_SIZE;
-
-	u32 FAT_size = boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
-	u32 first_data_sector = boot_entry.BPB_RsvdSecCnt + (boot_entry.BPB_NumFATs + FAT_size);
-
-	struct stat buffer;
-	if (fstat(fd, &buffer) == -1)
+	for (int i = 0; i < 8; i++) // extract the file name (without extension)
 	{
-		perror("fstat error");
-		exit(EXIT_FAILURE);
-	}
-
-	char *data = mmap(NULL, buffer.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (data == MAP_FAILED)
-	{
-		perror("mmap error");
-		exit(EXIT_FAILURE);
-	}
-
-	while (1)
-	{
-		u32 root_sector = (current_cluster - 2) * boot_entry.BPB_SecPerClus + first_data_sector;
-		DirEntry *dir_entry = (DirEntry *) (data + (root_sector * boot_entry.BPB_BytsPerSec));
-
-//		u32 root_dir_start =
-//			boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec + (boot_entry.BPB_NumFATs * FAT_size);
-
-		for (u32 i = 0; i < max_entry_count; i++)
+		if (file_name[i] == ' ')
 		{
-			if (dir_entry->DIR_Name[0] == 0x00) // End of root dir
+			dot_index = i;
+			break;
+		}
+	}
+	for (int i = 0; i < 3; i++) // extract the extension
+	{
+		extension[i] = file_name[8 + i];
+	}
+
+	if (extension[0] == ' ')
+	{
+		file_name[dot_index] = '\0';
+	}
+	else // put '.' and extension right after file name
+	{
+		file_name[dot_index] = '.';
+		for (int i = 0; i < 3; i++)
+		{
+			if (extension[i] == ' ')
 			{
+				file_name[dot_index + 1 + i] = '\0';
 				break;
 			}
-			if (dir_entry->DIR_Name[0] != 0xE5) // 0xE5 -> deleted, skip deleted files
+			file_name[dot_index + 1 + i] = extension[i];
+		}
+		file_name[dot_index + 4] = '\0';
+	}
+	return file_name;
+}
+
+bool same_file_name_except_first(char* str1, char* str2)
+{
+	for (int i = 1; i < 13; i++)
+	{
+		if (str1[i] != str2[i])
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file_to_recover)
+{
+	u32 FAT_area_size = boot_entry.BPB_NumFATs * boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
+	u32 reserved_sectors_size = boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec;
+	u32 root_dir_start = reserved_sectors_size + FAT_area_size;
+
+	u32 current_cluster = boot_entry.BPB_RootClus;
+	u32 cluster_size = boot_entry.BPB_SecPerClus * boot_entry.BPB_BytsPerSec;
+	u32 root_entry_size = boot_entry.BPB_RootEntCnt * DIR_ENTRY_SIZE;
+	u32 data_area_start = root_dir_start + root_entry_size;
+
+	int entry_count = 0;
+	bool root_dir_end = false;
+
+	while (current_cluster != 0x0FFFFFFF && !root_dir_end) // End of the cluster chain
+	{
+		u32 cluster_offset = (current_cluster - 2) * cluster_size;
+		lseek(fd, data_area_start + cluster_offset, SEEK_SET);
+
+		DirEntry dir_entry;
+
+		for (u32 i = 0; i < cluster_size; i += DIR_ENTRY_SIZE)
+		{
+			if (read(fd, &dir_entry, DIR_ENTRY_SIZE) != DIR_ENTRY_SIZE) // read current directory entry
 			{
-				char file_name[13];
-				memcpy(file_name, dir_entry->DIR_Name, 11);
+				root_dir_end = true; // if we can't read a full entry size, it's the end of directory
+				break;
+			}
 
-				int dot_index = 8;
-				char extension[3];
-				for (int i = 0; i < 8; i++) // extract the file name (without extension)
-				{
-					if (file_name[i] == ' ')
-					{
-						dot_index = i;
-						break;
-					}
-				}
-				for (int i = 0; i < 3; i++) // extract the extension
-				{
-					extension[i] = file_name[8 + i];
-				}
-				if (extension[0] == ' ')
-				{
-					file_name[dot_index] = '\0';
-				}
-				else // put '.' and extension right after file name
-				{
-					file_name[dot_index] = '.';
-					for (int i = 0; i < 3; i++)
-					{
-						if (extension[i] == ' ')
-						{
-							file_name[dot_index + 1 + i] = '\0';
-							break;
-						}
-						file_name[dot_index + 1 + i] = extension[i];
-					}
-					file_name[dot_index + 4] = '\0';
-				}
+			if (dir_entry.DIR_Name[0] == 0x00) // 0x00 -> End of root dir
+			{
+				root_dir_end = true;
+				break;
+			}
 
-				if (dir_entry->DIR_Attr & 0x10) // entry is a directory
+			char* file_name = (char*) malloc(13 * sizeof(char));
+			memcpy(file_name, dir_entry.DIR_Name, 11);
+			file_name = convert_file_name(file_name);
+
+			if (dir_entry.DIR_Name[0] != 0xE5 && flag == 'l') // if directory is not deleted and the flag is l (list)
+			{
+				if (dir_entry.DIR_Attr & 0x10) // entry is a directory
 				{
-					printf("%s/ (starting cluster = %u)\n", file_name, dir_entry->DIR_FstClusLO);
+					printf("%s/ (starting cluster = %u)\n", file_name, dir_entry.DIR_FstClusLO);
 				}
 				else
 				{
-					if (dir_entry->DIR_FileSize == 0)
-					{
-						printf("%s (size = %u)\n", file_name, dir_entry->DIR_FileSize);
-					}
+					if (dir_entry.DIR_FileSize == 0)
+						printf("%s (size = %u)\n", file_name, dir_entry.DIR_FileSize);
 					else
-					{
-						printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry->DIR_FileSize,
-							   dir_entry->DIR_FstClusLO);
-					}
-
+						printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
+							   dir_entry.DIR_FstClusLO);
 				}
 				entry_count++;
+				continue;
 			}
-			dir_entry++;
+
+			if (dir_entry.DIR_Name[0] == 0xE5 && flag == 'r') // if directory is deleted and the flag is r (recover)
+			{
+				if (same_file_name_except_first(file_name, file_to_recover))
+				{
+					dir_entry.DIR_Name[0] = file_to_recover[0];
+				}
+			}
 		}
 
-		u32 *next_cluster = (u32*)(data + (boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec) + (4 * current_cluster));
-		if(*next_cluster == 0x00 || *next_cluster >= 0x0ffffff8) // eof
-		{
-			break;
-		}
-		current_cluster = *next_cluster;
+		//Read next cluster from FAT
+		lseek(fd, reserved_sectors_size + (current_cluster * 4), SEEK_SET);
+		read(fd, &current_cluster, 4);
 	}
+
 	printf("Total number of entries = %d\n", entry_count);
 }
-
-
-//void list_root_directory(int fd, BootEntry boot_entry)
-//{
-//	u32 FAT_size = boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
-//	u32 root_dir_start =
-//			boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec + (boot_entry.BPB_NumFATs * FAT_size);
-//
-//	lseek(fd, root_dir_start, SEEK_SET);
-//	DirEntry dir_entry;
-//
-//	int entry_count = 0;
-//	while (read(fd, &dir_entry, DIR_ENTRY_SIZE) == DIR_ENTRY_SIZE)
-//	{
-//		if (dir_entry.DIR_Name[0] == 0x00) // End of root dir
-//		{
-//			break;
-//		}
-//
-//		if (dir_entry.DIR_Name[0] != 0xE5) // 0xE5 -> deleted
-//		{
-//			char file_name[13];
-//			memcpy(file_name, dir_entry.DIR_Name, 11);
-//
-//			int dot_index = 8;
-//			char extension[3];
-//			for (int i = 0; i < 8; i++) // extract the file name (without extension)
-//			{
-//				if (file_name[i] == ' ')
-//				{
-//					dot_index = i;
-//					break;
-//				}
-//			}
-//			for (int i = 0; i < 3; i++) // extract the extension
-//			{
-//				extension[i] = file_name[8+i];
-//			}
-//
-//			if (extension[0] == ' ')
-//			{
-//				file_name[dot_index] = '\0';
-//			}
-//			else // put '.' and extension right after file name
-//			{
-//				file_name[dot_index] = '.';
-//				for (int i = 0; i < 3; i++)
-//				{
-//					if (extension[i] == ' ')
-//					{
-//						file_name[dot_index+1+i] = '\0';
-//						break;
-//					}
-//					file_name[dot_index+1+i] = extension[i];
-//				}
-//				file_name[dot_index+4] = '\0';
-//			}
-//
-//			if (dir_entry.DIR_Attr & 0x10) // entry is a directory
-//			{
-//				printf("%s/ (starting cluster = %u)\n", file_name, dir_entry.DIR_FstClusLO);
-//			}
-//			else
-//			{
-//				if (dir_entry.DIR_FileSize == 0)
-//				{
-//					printf("%s (size = %u)\n", file_name, dir_entry.DIR_FileSize);
-//				}
-//				else
-//				{
-//					printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
-//						   dir_entry.DIR_FstClusLO);
-//				}
-//
-//			}
-//			entry_count++;
-//		}
-//	}
-//	printf("Total number of entries = %d\n", entry_count);
-//}
 
 int main(int argc, char *argv[])
 {
@@ -323,8 +260,8 @@ int main(int argc, char *argv[])
 					perror("Error opening the disk image.");
 					return 1;
 				}
-				BootEntry boot_entry = get_file_system_information(fd);
-				print_file_system_information(boot_entry);
+				BootEntry boot_entry = get_file_system_info(fd);
+				print_file_system_info(boot_entry);
 				close(fd);
 				break;
 			}
@@ -336,14 +273,22 @@ int main(int argc, char *argv[])
 					perror("Error opening the disk image.");
 					return 1;
 				}
-				BootEntry boot_entry = get_file_system_information(fd);
-				list_root_directory(fd, boot_entry);
+				BootEntry boot_entry = get_file_system_info(fd);
+				traverse_root_directory(fd, boot_entry, 'l', NULL);
 				close(fd);
 				break;
 			}
 			case 'r':
 			{
 				// Recover a contiguous file
+				int fd = open(disk_image_arg, O_RDWR);
+				if (fd == -1)
+				{
+					perror("Error opening the disk image.");
+					return 1;
+				}
+				BootEntry boot_entry = get_file_system_info(fd);
+				traverse_root_directory(fd, boot_entry, 'r', argv[3]);
 				break;
 			}
 			case 'R':
