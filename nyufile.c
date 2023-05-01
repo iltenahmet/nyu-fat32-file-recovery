@@ -18,8 +18,10 @@ zip nyufile.zip Makefile *.h *.c
 #include <fcntl.h>
 #include <unistd.h>
 
-const unsigned int STARTING_CLUSTER = 2;
-const unsigned int DIR_ENTRY_SIZE = 32;
+typedef unsigned int u32;
+
+const u32 STARTING_CLUSTER = 2;
+const u32 DIR_ENTRY_SIZE = 32;
 
 #pragma pack(push, 1)
 typedef struct BootEntry
@@ -36,19 +38,19 @@ typedef struct BootEntry
 	unsigned short BPB_FATSz16;       // 16-bit size in sectors of each FAT for FAT12 and FAT16. For FAT32, this field is 0
 	unsigned short BPB_SecPerTrk;     // Sectors per track of storage device
 	unsigned short BPB_NumHeads;      // Number of heads in storage device
-	unsigned int BPB_HiddSec;       // Number of sectors before the start of partition
-	unsigned int BPB_TotSec32;      // 32-bit value of number of sectors in file system. Either this value or the 16-bit value above must be 0
-	unsigned int BPB_FATSz32;       // 32-bit size in sectors of one FAT
+	u32 BPB_HiddSec;       // Number of sectors before the start of partition
+	u32 BPB_TotSec32;      // 32-bit value of number of sectors in file system. Either this value or the 16-bit value above must be 0
+	u32 BPB_FATSz32;       // 32-bit size in sectors of one FAT
 	unsigned short BPB_ExtFlags;      // A flag for FAT
 	unsigned short BPB_FSVer;         // The major and minor version number
-	unsigned int BPB_RootClus;      // Cluster where the root directory can be found
+	u32 BPB_RootClus;      // Cluster where the root directory can be found
 	unsigned short BPB_FSInfo;        // Sector where FSINFO structure can be found
 	unsigned short BPB_BkBootSec;     // Sector where backup copy of boot sector is located
 	unsigned char BPB_Reserved[12];  // Reserved
 	unsigned char BS_DrvNum;         // BIOS INT13h drive number
 	unsigned char BS_Reserved1;      // Not used
 	unsigned char BS_BootSig;        // Extended boot signature to identify if the next three values are valid
-	unsigned int BS_VolID;          // Volume serial number
+	u32 BS_VolID;          // Volume serial number
 	unsigned char BS_VolLab[11];     // Volume label in ASCII. User defines when creating the file system
 	unsigned char BS_FilSysType[8];  // File system type label in ASCII
 } BootEntry;
@@ -68,7 +70,7 @@ typedef struct DirEntry
 	unsigned short DIR_WrtTime;       // Written time (hours, minutes, seconds
 	unsigned short DIR_WrtDate;       // Written day
 	unsigned short DIR_FstClusLO;     // Low 2 bytes of the first cluster address
-	unsigned int DIR_FileSize;      // File size in bytes. (0 for directories)
+	u32 DIR_FileSize;      // File size in bytes. (0 for directories)
 } DirEntry;
 #pragma pack(pop)
 
@@ -111,82 +113,192 @@ void print_file_system_information(BootEntry boot_entry)
 
 void list_root_directory(int fd, BootEntry boot_entry)
 {
-	unsigned int FAT_size = boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
-	unsigned int root_dir_start =
-			boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec + (boot_entry.BPB_NumFATs * FAT_size);
+	u32 entry_count = 0;
+	u32 current_cluster = boot_entry.BPB_RootClus;
 
-	lseek(fd, root_dir_start, SEEK_SET);
-	DirEntry dir_entry;
+	u32 cluster_size = boot_entry.BPB_SecPerClus * boot_entry.BPB_BytsPerSec;
+	u32 max_entry_count = cluster_size / DIR_ENTRY_SIZE;
 
-	int entry_count = 0;
-	while (read(fd, &dir_entry, DIR_ENTRY_SIZE) == DIR_ENTRY_SIZE)
+	u32 FAT_size = boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
+	u32 first_data_sector = boot_entry.BPB_RsvdSecCnt + (boot_entry.BPB_NumFATs + FAT_size);
+
+	struct stat buffer;
+	if (fstat(fd, &buffer) == -1)
 	{
-		if (dir_entry.DIR_Name[0] == 0x00) // End of root dir
+		perror("fstat error");
+		exit(EXIT_FAILURE);
+	}
+
+	char *data = mmap(NULL, buffer.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (data == MAP_FAILED)
+	{
+		perror("mmap error");
+		exit(EXIT_FAILURE);
+	}
+
+	while (1)
+	{
+		u32 root_sector = (current_cluster - 2) * boot_entry.BPB_SecPerClus + first_data_sector;
+		DirEntry *dir_entry = (DirEntry *) (data + (root_sector * boot_entry.BPB_BytsPerSec));
+
+//		u32 root_dir_start =
+//			boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec + (boot_entry.BPB_NumFATs * FAT_size);
+
+		for (u32 i = 0; i < max_entry_count; i++)
 		{
-			break;
-		}
-
-		if (dir_entry.DIR_Name[0] != 0xE5) // 0xE5 -> deleted
-		{
-			char file_name[13];
-			memcpy(file_name, dir_entry.DIR_Name, 11);
-
-			int dot_index = 8;
-			char extension[3];
-			for (int i = 0; i < 8; i++) // extract the file name (without extension)
+			if (dir_entry->DIR_Name[0] == 0x00) // End of root dir
 			{
-				if (file_name[i] == ' ')
+				break;
+			}
+			if (dir_entry->DIR_Name[0] != 0xE5) // 0xE5 -> deleted, skip deleted files
+			{
+				char file_name[13];
+				memcpy(file_name, dir_entry->DIR_Name, 11);
+
+				int dot_index = 8;
+				char extension[3];
+				for (int i = 0; i < 8; i++) // extract the file name (without extension)
 				{
-					dot_index = i;
-					break;
-				}
-			}
-			for (int i = 0; i < 3; i++) // extract the extension
-			{
-				extension[i] = file_name[8+i];
-			}
-
-			if (extension[0] == ' ')
-			{
-				file_name[dot_index] = '\0';
-			}
-			else // put '.' and extension right after file name
-			{
-				file_name[dot_index] = '.';
-				for (int i = 0; i < 3; i++)
-				{
-					if (extension[i] == ' ')
+					if (file_name[i] == ' ')
 					{
-						file_name[dot_index+1+i] = '\0';
+						dot_index = i;
 						break;
 					}
-					file_name[dot_index+1+i] = extension[i];
 				}
-				file_name[dot_index+4] = '\0';
-			}
-
-			if (dir_entry.DIR_Attr & 0x10) // entry is a directory
-			{
-				printf("%s/ (starting cluster = %u)\n", file_name, dir_entry.DIR_FstClusLO);
-			}
-			else
-			{
-				if (dir_entry.DIR_FileSize == 0)
+				for (int i = 0; i < 3; i++) // extract the extension
 				{
-					printf("%s (size = %u)\n", file_name, dir_entry.DIR_FileSize);
+					extension[i] = file_name[8 + i];
+				}
+				if (extension[0] == ' ')
+				{
+					file_name[dot_index] = '\0';
+				}
+				else // put '.' and extension right after file name
+				{
+					file_name[dot_index] = '.';
+					for (int i = 0; i < 3; i++)
+					{
+						if (extension[i] == ' ')
+						{
+							file_name[dot_index + 1 + i] = '\0';
+							break;
+						}
+						file_name[dot_index + 1 + i] = extension[i];
+					}
+					file_name[dot_index + 4] = '\0';
+				}
+
+				if (dir_entry->DIR_Attr & 0x10) // entry is a directory
+				{
+					printf("%s/ (starting cluster = %u)\n", file_name, dir_entry->DIR_FstClusLO);
 				}
 				else
 				{
-					printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
-						   dir_entry.DIR_FstClusLO);
-				}
+					if (dir_entry->DIR_FileSize == 0)
+					{
+						printf("%s (size = %u)\n", file_name, dir_entry->DIR_FileSize);
+					}
+					else
+					{
+						printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry->DIR_FileSize,
+							   dir_entry->DIR_FstClusLO);
+					}
 
+				}
+				entry_count++;
 			}
-			entry_count++;
+			dir_entry++;
 		}
+
+		u32 *next_cluster = (u32*)(data + (boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec) + (4 * current_cluster));
+		if(*next_cluster == 0x00 || *next_cluster >= 0x0ffffff8) // eof
+		{
+			break;
+		}
+		current_cluster = *next_cluster;
 	}
 	printf("Total number of entries = %d\n", entry_count);
 }
+
+
+//void list_root_directory(int fd, BootEntry boot_entry)
+//{
+//	u32 FAT_size = boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
+//	u32 root_dir_start =
+//			boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec + (boot_entry.BPB_NumFATs * FAT_size);
+//
+//	lseek(fd, root_dir_start, SEEK_SET);
+//	DirEntry dir_entry;
+//
+//	int entry_count = 0;
+//	while (read(fd, &dir_entry, DIR_ENTRY_SIZE) == DIR_ENTRY_SIZE)
+//	{
+//		if (dir_entry.DIR_Name[0] == 0x00) // End of root dir
+//		{
+//			break;
+//		}
+//
+//		if (dir_entry.DIR_Name[0] != 0xE5) // 0xE5 -> deleted
+//		{
+//			char file_name[13];
+//			memcpy(file_name, dir_entry.DIR_Name, 11);
+//
+//			int dot_index = 8;
+//			char extension[3];
+//			for (int i = 0; i < 8; i++) // extract the file name (without extension)
+//			{
+//				if (file_name[i] == ' ')
+//				{
+//					dot_index = i;
+//					break;
+//				}
+//			}
+//			for (int i = 0; i < 3; i++) // extract the extension
+//			{
+//				extension[i] = file_name[8+i];
+//			}
+//
+//			if (extension[0] == ' ')
+//			{
+//				file_name[dot_index] = '\0';
+//			}
+//			else // put '.' and extension right after file name
+//			{
+//				file_name[dot_index] = '.';
+//				for (int i = 0; i < 3; i++)
+//				{
+//					if (extension[i] == ' ')
+//					{
+//						file_name[dot_index+1+i] = '\0';
+//						break;
+//					}
+//					file_name[dot_index+1+i] = extension[i];
+//				}
+//				file_name[dot_index+4] = '\0';
+//			}
+//
+//			if (dir_entry.DIR_Attr & 0x10) // entry is a directory
+//			{
+//				printf("%s/ (starting cluster = %u)\n", file_name, dir_entry.DIR_FstClusLO);
+//			}
+//			else
+//			{
+//				if (dir_entry.DIR_FileSize == 0)
+//				{
+//					printf("%s (size = %u)\n", file_name, dir_entry.DIR_FileSize);
+//				}
+//				else
+//				{
+//					printf("%s (size = %u, starting cluster = %u)\n", file_name, dir_entry.DIR_FileSize,
+//						   dir_entry.DIR_FstClusLO);
+//				}
+//
+//			}
+//			entry_count++;
+//		}
+//	}
+//	printf("Total number of entries = %d\n", entry_count);
+//}
 
 int main(int argc, char *argv[])
 {
