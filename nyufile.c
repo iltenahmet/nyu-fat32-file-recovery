@@ -112,7 +112,7 @@ void print_file_system_info(BootEntry boot_entry)
 	printf("Number of reserved sectors = %u\n", boot_entry.BPB_RsvdSecCnt);
 }
 
-char* convert_file_name(char* file_name)
+char *convert_file_name(char *file_name)
 {
 	int dot_index = 8;
 	char extension[3];
@@ -151,9 +151,9 @@ char* convert_file_name(char* file_name)
 	return file_name;
 }
 
-bool same_file_name_except_first(char* str1, char* str2)
+bool same_file_name_except_first(char *str1, char *str2)
 {
-	for (int i = 1; i < 13; i++)
+	for (int i = 1; i < (int) strlen(str1); i++)
 	{
 		if (str1[i] != str2[i])
 		{
@@ -163,7 +163,7 @@ bool same_file_name_except_first(char* str1, char* str2)
 	return true;
 }
 
-void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file_to_recover)
+void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file_to_recover)
 {
 	u32 FAT_area_size = boot_entry.BPB_NumFATs * boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
 	u32 reserved_sectors_size = boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec;
@@ -176,6 +176,7 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file
 
 	int entry_count = 0;
 	bool root_dir_end = false;
+	bool file_found_and_recovered = false;
 
 	while (current_cluster != 0x0FFFFFFF && !root_dir_end) // End of the cluster chain
 	{
@@ -186,6 +187,8 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file
 
 		for (u32 i = 0; i < cluster_size; i += DIR_ENTRY_SIZE)
 		{
+			off_t dir_entry_position = lseek(fd, 0, SEEK_CUR);
+
 			if (read(fd, &dir_entry, DIR_ENTRY_SIZE) != DIR_ENTRY_SIZE) // read current directory entry
 			{
 				root_dir_end = true; // if we can't read a full entry size, it's the end of directory
@@ -198,7 +201,7 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file
 				break;
 			}
 
-			char* file_name = (char*) malloc(13 * sizeof(char));
+			char *file_name = (char *) malloc(13 * sizeof(char));
 			memcpy(file_name, dir_entry.DIR_Name, 11);
 			file_name = convert_file_name(file_name);
 
@@ -225,7 +228,14 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file
 				if (same_file_name_except_first(file_name, file_to_recover))
 				{
 					dir_entry.DIR_Name[0] = file_to_recover[0];
+
+					// go back to the dir_entry_position and write to the disk
+					lseek(fd, dir_entry_position, SEEK_SET);
+					write(fd, &dir_entry, DIR_ENTRY_SIZE);
+
+					file_found_and_recovered = true;
 				}
+
 			}
 		}
 
@@ -234,7 +244,19 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char* file
 		read(fd, &current_cluster, 4);
 	}
 
-	printf("Total number of entries = %d\n", entry_count);
+	if (flag == 'r' && !file_found_and_recovered)
+	{
+		printf("%s: file not found\n", file_to_recover);
+	}
+	else if (flag == 'r')
+	{
+		printf("%s: successfully recovered\n", file_to_recover);
+	}
+
+	if (flag == 'l')
+	{
+		printf("Total number of entries = %d\n", entry_count);
+	}
 }
 
 int main(int argc, char *argv[])
@@ -305,5 +327,7 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
+
+
 
 
