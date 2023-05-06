@@ -21,7 +21,6 @@ zip nyufile.zip Makefile *.h *.c
 
 typedef unsigned int u32;
 
-const u32 STARTING_CLUSTER = 2;
 const u32 DIR_ENTRY_SIZE = 32;
 
 #pragma pack(push, 1)
@@ -272,14 +271,33 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 		lseek(fd, entry_to_recover_position, SEEK_SET);
 		write(fd, &entry_to_recover, DIR_ENTRY_SIZE);
 
-		//update the fat info
-		u32 first_cluster = ((u32)entry_to_recover.DIR_FstClusHI << 16) | entry_to_recover.DIR_FstClusLO;
-		if (first_cluster != 0) // make sure we don't modify the first two entries of fat
+		//get the first cluster
+		u32 file_first_cluster = ((u32)entry_to_recover.DIR_FstClusHI << 16) | entry_to_recover.DIR_FstClusLO;
+		u32 file_current_cluster = file_first_cluster;
+
+		u32 file_cluster_count = (entry_to_recover.DIR_FileSize + offsets.cluster_size - 1) / offsets.cluster_size;
+		u32 fat_offset = offsets.reserved_sectors_size + (file_current_cluster * 4);
+
+		printf("cluster count: %d\n", file_cluster_count);
+
+		// go to the last cluster
+		for(u32 i = 0; i < file_cluster_count; i++)
 		{
-			u32 fat_offset = offsets.reserved_sectors_size + (first_cluster * 4);
-			u32 next_cluster = 0x0FFFFFFF; // to mark end of cluster chain
+			printf("Current cluster: %d\n", file_current_cluster);
+
+			fat_offset = offsets.reserved_sectors_size + (file_current_cluster * 4);
+
+			// read the next cluster value from FAT
 			lseek(fd, fat_offset, SEEK_SET);
-			write(fd, &next_cluster, 4);
+			read(fd, &file_current_cluster, 4);
+		}
+
+		// mark last fat cluster as end of chain
+		if (file_first_cluster != 0) //making sure we don't modify the first two fat entries
+		{
+			u32 end_of_chain = 0x0FFFFFFF;
+			lseek(fd, fat_offset, SEEK_SET);
+			write(fd, &end_of_chain, 4);
 		}
 
 		printf("%s: successfully recovered\n", file_to_recover);
