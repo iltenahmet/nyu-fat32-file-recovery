@@ -76,14 +76,15 @@ typedef struct DirEntry
 #pragma pack(pop)
 
 #pragma pack(push, 1)
-typedef struct Offsets {
+typedef struct Offsets
+{
 	u32 FAT_area_size;
 	u32 reserved_sectors_size;
 	u32 root_dir_start;
 	u32 cluster_size;
 	u32 root_entry_size;
 	u32 data_area_start;
-}Offsets;
+} Offsets;
 #pragma pack(pop)
 
 void print_usage_information()
@@ -272,10 +273,14 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 		write(fd, &entry_to_recover, DIR_ENTRY_SIZE);
 
 		//update the fat info
-		u32 next_cluster = 0x0FFFFFFF; // to mark end of cluster chain
-		u32 fat_offset = offsets.reserved_sectors_size + (entry_to_recover.DIR_FstClusLO * 4);
-		lseek(fd, fat_offset, SEEK_SET);
-		write(fd, &next_cluster, 4);
+		u32 first_cluster = ((u32)entry_to_recover.DIR_FstClusHI << 16) | entry_to_recover.DIR_FstClusLO;
+		if (first_cluster != 0) // make sure we don't modify the first two entries of fat
+		{
+			u32 fat_offset = offsets.reserved_sectors_size + (first_cluster * 4);
+			u32 next_cluster = 0x0FFFFFFF; // to mark end of cluster chain
+			lseek(fd, fat_offset, SEEK_SET);
+			write(fd, &next_cluster, 4);
+		}
 
 		printf("%s: successfully recovered\n", file_to_recover);
 	}
