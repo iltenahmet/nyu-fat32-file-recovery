@@ -75,6 +75,17 @@ typedef struct DirEntry
 } DirEntry;
 #pragma pack(pop)
 
+#pragma pack(push, 1)
+typedef struct Offsets {
+	u32 FAT_area_size;
+	u32 reserved_sectors_size;
+	u32 root_dir_start;
+	u32 cluster_size;
+	u32 root_entry_size;
+	u32 data_area_start;
+}Offsets;
+#pragma pack(pop)
+
 void print_usage_information()
 {
 	printf("Usage: ./nyufile disk <options>\n");
@@ -163,32 +174,42 @@ bool same_file_name_except_first(char *str1, char *str2)
 	return true;
 }
 
+Offsets calculate_offsets(BootEntry boot_entry)
+{
+	Offsets offsets;
+
+	offsets.FAT_area_size = boot_entry.BPB_NumFATs * boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
+	offsets.reserved_sectors_size = boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec;
+	offsets.root_dir_start = offsets.reserved_sectors_size + offsets.FAT_area_size;
+	offsets.cluster_size = boot_entry.BPB_SecPerClus * boot_entry.BPB_BytsPerSec;
+	offsets.root_entry_size = boot_entry.BPB_RootEntCnt * DIR_ENTRY_SIZE;
+	offsets.data_area_start = offsets.root_dir_start + offsets.root_entry_size;
+
+	return offsets;
+}
+
 void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file_to_recover)
 {
-	u32 FAT_area_size = boot_entry.BPB_NumFATs * boot_entry.BPB_FATSz32 * boot_entry.BPB_BytsPerSec;
-	u32 reserved_sectors_size = boot_entry.BPB_RsvdSecCnt * boot_entry.BPB_BytsPerSec;
-	u32 root_dir_start = reserved_sectors_size + FAT_area_size;
-
+	Offsets offsets = calculate_offsets(boot_entry);
 	u32 current_cluster = boot_entry.BPB_RootClus;
-	u32 cluster_size = boot_entry.BPB_SecPerClus * boot_entry.BPB_BytsPerSec;
-	u32 root_entry_size = boot_entry.BPB_RootEntCnt * DIR_ENTRY_SIZE;
-	u32 data_area_start = root_dir_start + root_entry_size;
 
 	int entry_count = 0;
+	int same_file_count = 0;
 	bool root_dir_end = false;
-	bool file_found_and_recovered = false;
+
+	DirEntry entry_to_recover;
+	off_t entry_to_recover_position;
 
 	while (current_cluster != 0x0FFFFFFF && !root_dir_end) // End of the cluster chain
 	{
-		u32 cluster_offset = (current_cluster - 2) * cluster_size;
-		lseek(fd, data_area_start + cluster_offset, SEEK_SET);
+		u32 cluster_offset = (current_cluster - 2) * offsets.cluster_size;
+		lseek(fd, offsets.data_area_start + cluster_offset, SEEK_SET);
 
 		DirEntry dir_entry;
+		off_t dir_entry_position = lseek(fd, 0, SEEK_CUR);
 
-		for (u32 i = 0; i < cluster_size; i += DIR_ENTRY_SIZE)
+		for (u32 i = 0; i < offsets.cluster_size; i += DIR_ENTRY_SIZE)
 		{
-			off_t dir_entry_position = lseek(fd, 0, SEEK_CUR);
-
 			if (read(fd, &dir_entry, DIR_ENTRY_SIZE) != DIR_ENTRY_SIZE) // read current directory entry
 			{
 				root_dir_end = true; // if we can't read a full entry size, it's the end of directory
@@ -205,7 +226,8 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 			memcpy(file_name, dir_entry.DIR_Name, 11);
 			file_name = convert_file_name(file_name);
 
-			if (dir_entry.DIR_Name[0] != 0xE5 && flag == 'l') // if directory is not deleted and the flag is l (list)
+			// List root directory
+			if (dir_entry.DIR_Name[0] != 0xE5 && flag == 'l') // skip deleted files
 			{
 				if (dir_entry.DIR_Attr & 0x10) // entry is a directory
 				{
@@ -223,34 +245,48 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 				continue;
 			}
 
-			if (dir_entry.DIR_Name[0] == 0xE5 && flag == 'r') // if directory is deleted and the flag is r (recover)
+			// Detect deleted files
+			if (dir_entry.DIR_Name[0] == 0xE5 && flag == 'r')
 			{
 				if (same_file_name_except_first(file_name, file_to_recover))
 				{
-					dir_entry.DIR_Name[0] = file_to_recover[0];
-
-					// go back to the dir_entry_position and write to the disk
-					lseek(fd, dir_entry_position, SEEK_SET);
-					write(fd, &dir_entry, DIR_ENTRY_SIZE);
-
-					file_found_and_recovered = true;
+					same_file_count++;
+					entry_to_recover = dir_entry;
+					entry_to_recover_position = dir_entry_position;
 				}
 
 			}
 		}
 
 		//Read next cluster from FAT
-		lseek(fd, reserved_sectors_size + (current_cluster * 4), SEEK_SET);
+		lseek(fd, offsets.reserved_sectors_size + (current_cluster * 4), SEEK_SET);
 		read(fd, &current_cluster, 4);
 	}
 
-	if (flag == 'r' && !file_found_and_recovered)
+	//recover small contiguous file
+	if (flag == 'r' && same_file_count == 1)
+	{
+		//change directory name
+		entry_to_recover.DIR_Name[0] = file_to_recover[0];
+		lseek(fd, entry_to_recover_position, SEEK_SET);
+		write(fd, &entry_to_recover, DIR_ENTRY_SIZE);
+
+		//update the fat info
+		u32 next_cluster = 0x0FFFFFFF; // to mark end of cluster chain
+		u32 fat_offset = offsets.reserved_sectors_size + (entry_to_recover.DIR_FstClusLO * 4);
+		lseek(fd, fat_offset, SEEK_SET);
+		write(fd, &next_cluster, 4);
+
+		printf("%s: successfully recovered\n", file_to_recover);
+	}
+	else if (flag == 'r' && same_file_count == 0)
 	{
 		printf("%s: file not found\n", file_to_recover);
+
 	}
 	else if (flag == 'r')
 	{
-		printf("%s: successfully recovered\n", file_to_recover);
+		printf("%s: multiple candidates found\n", file_to_recover);
 	}
 
 	if (flag == 'l')
