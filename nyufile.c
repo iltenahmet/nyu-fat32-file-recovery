@@ -19,9 +19,7 @@ zip nyufile.zip Makefile *.h *.c
 #include <fcntl.h>
 #include <unistd.h>
 
-typedef unsigned int u32;
-
-const u32 DIR_ENTRY_SIZE = 32;
+const unsigned int DIR_ENTRY_SIZE = 32;
 
 #pragma pack(push, 1)
 typedef struct BootEntry
@@ -38,19 +36,19 @@ typedef struct BootEntry
 	unsigned short BPB_FATSz16;       // 16-bit size in sectors of each FAT for FAT12 and FAT16. For FAT32, this field is 0
 	unsigned short BPB_SecPerTrk;     // Sectors per track of storage device
 	unsigned short BPB_NumHeads;      // Number of heads in storage device
-	u32 BPB_HiddSec;       // Number of sectors before the start of partition
-	u32 BPB_TotSec32;      // 32-bit value of number of sectors in file system. Either this value or the 16-bit value above must be 0
-	u32 BPB_FATSz32;       // 32-bit size in sectors of one FAT
+	unsigned int BPB_HiddSec;       // Number of sectors before the start of partition
+	unsigned int BPB_TotSec32;      // 32-bit value of number of sectors in file system. Either this value or the 16-bit value above must be 0
+	unsigned int BPB_FATSz32;       // 32-bit size in sectors of one FAT
 	unsigned short BPB_ExtFlags;      // A flag for FAT
 	unsigned short BPB_FSVer;         // The major and minor version number
-	u32 BPB_RootClus;      // Cluster where the root directory can be found
+	unsigned int BPB_RootClus;      // Cluster where the root directory can be found
 	unsigned short BPB_FSInfo;        // Sector where FSINFO structure can be found
 	unsigned short BPB_BkBootSec;     // Sector where backup copy of boot sector is located
 	unsigned char BPB_Reserved[12];  // Reserved
 	unsigned char BS_DrvNum;         // BIOS INT13h drive number
 	unsigned char BS_Reserved1;      // Not used
 	unsigned char BS_BootSig;        // Extended boot signature to identify if the next three values are valid
-	u32 BS_VolID;          // Volume serial number
+	unsigned int BS_VolID;          // Volume serial number
 	unsigned char BS_VolLab[11];     // Volume label in ASCII. User defines when creating the file system
 	unsigned char BS_FilSysType[8];  // File system type label in ASCII
 } BootEntry;
@@ -70,19 +68,19 @@ typedef struct DirEntry
 	unsigned short DIR_WrtTime;       // Written time (hours, minutes, seconds
 	unsigned short DIR_WrtDate;       // Written day
 	unsigned short DIR_FstClusLO;     // Low 2 bytes of the first cluster address
-	u32 DIR_FileSize;      // File size in bytes. (0 for directories)
+	unsigned int DIR_FileSize;      // File size in bytes. (0 for directories)
 } DirEntry;
 #pragma pack(pop)
 
 #pragma pack(push, 1)
 typedef struct Offsets
 {
-	u32 FAT_area_size;
-	u32 reserved_sectors_size;
-	u32 root_dir_start;
-	u32 cluster_size;
-	u32 root_entry_size;
-	u32 data_area_start;
+	unsigned int FAT_area_size;
+	unsigned int reserved_sectors_size;
+	unsigned int root_dir_start;
+	unsigned int cluster_size;
+	unsigned int root_entry_size;
+	unsigned int data_area_start;
 } Offsets;
 #pragma pack(pop)
 
@@ -191,7 +189,7 @@ Offsets calculate_offsets(BootEntry boot_entry)
 void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file_to_recover)
 {
 	Offsets offsets = calculate_offsets(boot_entry);
-	u32 current_cluster = boot_entry.BPB_RootClus;
+	unsigned int current_cluster = boot_entry.BPB_RootClus;
 
 	int entry_count = 0;
 	int same_file_count = 0;
@@ -202,13 +200,13 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 
 	while (current_cluster != 0x0FFFFFFF && !root_dir_end) // End of the cluster chain
 	{
-		u32 cluster_offset = (current_cluster - 2) * offsets.cluster_size;
+		unsigned int cluster_offset = (current_cluster - 2) * offsets.cluster_size;
 		lseek(fd, offsets.data_area_start + cluster_offset, SEEK_SET);
 
 		DirEntry dir_entry;
 		off_t dir_entry_position = lseek(fd, 0, SEEK_CUR);
 
-		for (u32 i = 0; i < offsets.cluster_size; i += DIR_ENTRY_SIZE)
+		for (unsigned int i = 0; i < offsets.cluster_size; i += DIR_ENTRY_SIZE)
 		{
 			if (read(fd, &dir_entry, DIR_ENTRY_SIZE) != DIR_ENTRY_SIZE) // read current directory entry
 			{
@@ -272,16 +270,16 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 		write(fd, &entry_to_recover, DIR_ENTRY_SIZE);
 
 		//get the first cluster
-		u32 file_first_cluster = ((u32)entry_to_recover.DIR_FstClusHI << 16) | entry_to_recover.DIR_FstClusLO;
-		u32 file_current_cluster = file_first_cluster;
+		unsigned int file_first_cluster = ((unsigned int)entry_to_recover.DIR_FstClusHI << 16) | entry_to_recover.DIR_FstClusLO;
+		unsigned int file_current_cluster = file_first_cluster;
 
-		u32 file_cluster_count = (entry_to_recover.DIR_FileSize + offsets.cluster_size - 1) / offsets.cluster_size;
-		u32 fat_offset = offsets.reserved_sectors_size + (file_current_cluster * 4);
+		unsigned int file_cluster_count = (entry_to_recover.DIR_FileSize + offsets.cluster_size - 1) / offsets.cluster_size;
+		unsigned int fat_offset = offsets.reserved_sectors_size + (file_current_cluster * 4);
 
 		printf("cluster count: %d\n", file_cluster_count);
 
 		// go to the last cluster
-		for(u32 i = 0; i < file_cluster_count; i++)
+		for(unsigned int i = 0; i < file_cluster_count; i++)
 		{
 			printf("Current cluster: %d\n", file_current_cluster);
 
@@ -295,7 +293,7 @@ void traverse_root_directory(int fd, BootEntry boot_entry, char flag, char *file
 		// mark last fat cluster as end of chain
 		if (file_first_cluster != 0) //making sure we don't modify the first two fat entries
 		{
-			u32 end_of_chain = 0x0FFFFFFF;
+			unsigned int end_of_chain = 0x0FFFFFFF;
 			lseek(fd, fat_offset, SEEK_SET);
 			write(fd, &end_of_chain, 4);
 		}
